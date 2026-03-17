@@ -114,6 +114,11 @@ def training_session(settings_file: Path, out_path: Path) -> None:
         logger.info(f"\tCumulative wait: {training_stats['cumulative_wait'][-1]}")
         logger.info(f"\tAvg queue: {training_stats['avg_queue_length'][-1]}")
 
+        if settings.checkpoint_interval > 0 and (episode + 1) % settings.checkpoint_interval == 0:
+            out_path.mkdir(parents=True, exist_ok=True)
+            agent.save_checkpoint(out_path, episode + 1)
+            logger.info(f"\tCheckpoint saved: checkpoint_ep{episode + 1}.pt")
+
     out_path.mkdir(parents=True, exist_ok=True)
     agent.save_model(out_path)
 

@@ -20,6 +20,8 @@ memory_size_max: 50000
 
 # agent
 gamma: 0.75
+target_update_interval: 100
+checkpoint_interval: 0
 
 # paths
 sumocfg_file: intersection/sumo_config.sumocfg

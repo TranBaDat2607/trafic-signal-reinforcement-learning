@@ -1,4 +1,10 @@
-"""State extraction: converts TraCI vehicle data into a binary state vector."""
+"""State extraction: converts TraCI vehicle data into a 3-channel state vector.
+
+Channels (each of length NUM_CELLS):
+  0: presence      — 1 if any vehicle occupies the cell, else 0
+  1: speed (norm)  — mean speed of vehicles in cell, normalised to [0, 1]
+  2: wait  (norm)  — mean waiting time of vehicles in cell, normalised to [0, 1]
+"""
 
 from __future__ import annotations
 
@@ -10,8 +16,10 @@ from constants import (
     CELLS_PER_LANE_GROUP,
     LANE_DISTANCE_TO_CELL,
     LANE_ID_TO_GROUP,
+    MAX_SPEED,
+    MAX_WAIT_TIME,
+    NUM_CELLS,
     ROAD_MAX_LENGTH,
-    STATE_SIZE,
 )
 
 
@@ -42,19 +50,22 @@ def get_lane_cell(lane_pos: float) -> int:
 
 
 def get_state() -> NDArray:
-    """Compute the binary occupancy state vector from all active vehicles.
+    """Compute the 3-channel state vector from all active vehicles.
 
-    Iterates over all active vehicles in the simulation, maps each one to its
-    lane group and cell, and sets the corresponding position in the state vector
-    to 1.
+    Iterates over all active vehicles, maps each to its lane group and cell,
+    and accumulates presence, speed, and waiting-time information per cell.
 
     Returns:
-        A NumPy array of shape (STATE_SIZE,) with 0/1 occupancy values.
+        A NumPy array of shape (STATE_SIZE,) = (NUM_CELLS * 3,) with values
+        in [0, 1].  Layout: [presence | speed_norm | wait_norm].
 
     Raises:
         ValueError: If a computed car_position is out of bounds.
     """
-    state = np.zeros(STATE_SIZE, dtype=float)
+    presence  = np.zeros(NUM_CELLS, dtype=float)
+    speed_sum = np.zeros(NUM_CELLS, dtype=float)
+    wait_sum  = np.zeros(NUM_CELLS, dtype=float)
+    count     = np.zeros(NUM_CELLS, dtype=float)
 
     for car_id in traci.vehicle.getIDList():
         lane_id = traci.vehicle.getLaneID(car_id)
@@ -68,10 +79,17 @@ def get_state() -> NDArray:
 
         car_position = lane_group * CELLS_PER_LANE_GROUP + lane_cell
 
-        if car_position < 0 or car_position >= STATE_SIZE:
+        if car_position < 0 or car_position >= NUM_CELLS:
             msg = "Out of bounds car position."
             raise ValueError(msg)
 
-        state[car_position] = 1.0
+        presence[car_position] = 1.0
+        speed_sum[car_position] += traci.vehicle.getSpeed(car_id)
+        wait_sum[car_position]  += traci.vehicle.getWaitingTime(car_id)
+        count[car_position]     += 1.0
 
-    return state
+    denom = np.maximum(count, 1.0)
+    speed_norm = np.clip(speed_sum / denom / MAX_SPEED,     0.0, 1.0)
+    wait_norm  = np.clip(wait_sum  / denom / MAX_WAIT_TIME, 0.0, 1.0)
+
+    return np.concatenate([presence, speed_norm, wait_norm])

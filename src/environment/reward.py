@@ -31,8 +31,4 @@ def get_queue_length() -> int:
     Returns:
         Total number of vehicles with speed 0 on all four incoming edges.
     """
-    halt_n = traci.edge.getLastStepHaltingNumber("N2TL")
-    halt_s = traci.edge.getLastStepHaltingNumber("S2TL")
-    halt_e = traci.edge.getLastStepHaltingNumber("E2TL")
-    halt_w = traci.edge.getLastStepHaltingNumber("W2TL")
-    return int(halt_n + halt_s + halt_e + halt_w)
+    return sum(traci.edge.getLastStepHaltingNumber(edge) for edge in INCOMING_EDGES)

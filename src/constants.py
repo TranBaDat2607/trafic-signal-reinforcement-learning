@@ -76,8 +76,12 @@ TL_GREEN_TO_YELLOW = {
 # RL state / action space
 # ---------------------------------------------------------------------------
 
-STATE_SIZE = 80  # 8 lane groups * 10 cells
+NUM_CELLS = 80          # 8 lane groups × 10 cells — occupancy grid size
+STATE_SIZE = NUM_CELLS * 3  # presence + normalised speed + normalised wait = 240
 NUM_ACTIONS = 4  # matches keys in ACTION_TO_TL_PHASE
+
+MAX_SPEED     = 25.0   # m/s — from vehicle type maxSpeed in SUMO config
+MAX_WAIT_TIME = 400.0  # s   — normalisation ceiling for per-vehicle wait time
 
 # ---------------------------------------------------------------------------
 # Lane geometry and discretization

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveFloat, PositiveInt, model_validator
@@ -30,6 +30,8 @@ class TrainingSettings(BaseModel):
 
     # agent
     gamma: Annotated[float, Field(ge=0, le=1)]
+    target_update_interval: PositiveInt
+    checkpoint_interval: NonNegativeInt
 
     # paths
     sumocfg_file: Path
@@ -51,6 +53,7 @@ class TestingSettings(BaseModel):
 
     # simulation
     gui: bool
+    total_episodes: PositiveInt
     max_steps: PositiveInt
     n_cars_generated: PositiveInt
     episode_seed: int
@@ -109,3 +112,29 @@ def load_testing_settings(settings_file: Path) -> TestingSettings:
         A validated TestingSettings instance.
     """
     return TestingSettings.model_validate(load_yaml(settings_file))
+
+
+class GridTrainingSettings(TrainingSettings):
+    """Training settings for the multi-agent NxN grid extension.
+
+    Inherits all :class:`TrainingSettings` fields and adds grid-specific ones.
+    """
+
+    grid_n: PositiveInt = 2
+    junction_spacing: PositiveInt = 1500
+    mode: Literal["Independent", "SharedParameters", "NeighborAware"] = "Independent"
+    grid_net_file: Path = Path("intersection_grid/grid_2x2.net.xml")
+    grid_sumocfg_file: Path = Path("intersection_grid/grid_2x2.sumocfg")
+    grid_routes_file: Path = Path("intersection_grid/grid_2x2_routes.rou.xml")
+
+
+def load_grid_training_settings(settings_file: Path) -> GridTrainingSettings:
+    """Load and validate grid training settings from a YAML file.
+
+    Args:
+        settings_file: Path to the grid training settings YAML file.
+
+    Returns:
+        A validated :class:`GridTrainingSettings` instance.
+    """
+    return GridTrainingSettings.model_validate(load_yaml(settings_file))

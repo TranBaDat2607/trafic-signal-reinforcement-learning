@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -84,12 +85,15 @@ class Model:
         self.input_dim = input_dim
         self.output_dim = output_dim
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Model device: {self.device}")
+
         self.model = MLP(
             input_dim=input_dim,
             output_dim=output_dim,
             num_layers=num_layers,
             width=width,
-        )
+        ).to(self.device)
 
         if model_path and (model_path / MODEL_FILE).exists():
             model_file = model_path / MODEL_FILE
@@ -98,7 +102,11 @@ class Model:
         else:
             logger.info("Creating new model for the Agent")
 
-        self.loss_fn = nn.MSELoss()
+        self.target_model = copy.deepcopy(self.model)
+        for param in self.target_model.parameters():
+            param.requires_grad = False
+
+        self.loss_fn = nn.HuberLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
     def _load_weights(self, model_file: Path) -> None:
@@ -107,7 +115,7 @@ class Model:
         Args:
             model_file: Path to the ``.pt`` file produced by ``save_model``.
         """
-        state_dict = torch.load(model_file, weights_only=True, map_location="cpu")
+        state_dict = torch.load(model_file, weights_only=True, map_location=self.device)
         self.model.load_state_dict(state_dict)
 
     def _predict(self, states: NDArray) -> NDArray:
@@ -122,7 +130,7 @@ class Model:
         self.model.eval()
         with torch.no_grad():
             arr = np.asarray(states, dtype=np.float32)
-            outputs = self.model(torch.from_numpy(arr))
+            outputs = self.model(torch.from_numpy(arr).to(self.device))
             return outputs.cpu().numpy()
 
     def predict_one(self, state: NDArray) -> NDArray:
@@ -148,6 +156,25 @@ class Model:
         """
         return self._predict(states)
 
+    def predict_batch_target(self, states: NDArray) -> NDArray:
+        """Predict Q-values using the frozen target network.
+
+        Args:
+            states: Array of shape (batch_size, input_dim).
+
+        Returns:
+            Array of shape (batch_size, output_dim).
+        """
+        self.target_model.eval()
+        with torch.no_grad():
+            arr = np.asarray(states, dtype=np.float32)
+            outputs = self.target_model(torch.from_numpy(arr).to(self.device))
+            return outputs.cpu().numpy()
+
+    def update_target_network(self) -> None:
+        """Copy online network weights into the frozen target network."""
+        self.target_model.load_state_dict(self.model.state_dict())
+
     def train_batch(self, states: NDArray, q_sa: NDArray) -> None:
         """Train the model for one step on a batch.
 
@@ -157,8 +184,8 @@ class Model:
         """
         self.model.train()
 
-        states_tensor = torch.from_numpy(np.asarray(states, dtype=np.float32))
-        q_sa_tensor = torch.from_numpy(np.asarray(q_sa, dtype=np.float32))
+        states_tensor = torch.from_numpy(np.asarray(states, dtype=np.float32)).to(self.device)
+        q_sa_tensor = torch.from_numpy(np.asarray(q_sa, dtype=np.float32)).to(self.device)
 
         self.optimizer.zero_grad()
         predictions = self.model(states_tensor)
@@ -176,3 +203,12 @@ class Model:
         """
         out_path.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), out_path / MODEL_FILE)
+
+    def save_weights(self, file_path: Path) -> None:
+        """Save model weights to an explicit file path.
+
+        Args:
+            file_path: Destination ``.pt`` file path.
+        """
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.model.state_dict(), file_path)

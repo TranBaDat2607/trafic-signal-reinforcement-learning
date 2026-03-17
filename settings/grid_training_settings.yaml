@@ -1,0 +1,35 @@
+# simulation
+gui: false
+total_episodes: 10
+max_steps: 5400
+n_cars_generated: 4000
+green_duration: 10
+yellow_duration: 4
+turn_chance: 0.25
+
+# model
+num_layers: 4
+width_layers: 400
+batch_size: 100
+learning_rate: 0.001
+training_epochs: 800
+
+# memory
+memory_size_min: 600
+memory_size_max: 50000
+
+# agent
+gamma: 0.75
+target_update_interval: 100
+checkpoint_interval: 0
+
+# paths (required by TrainingSettings base class)
+sumocfg_file: intersection_grid/grid_2x2.sumocfg
+
+# grid extension
+grid_n: 2
+junction_spacing: 1500
+mode: Independent
+grid_net_file: intersection_grid/grid_2x2.net.xml
+grid_sumocfg_file: intersection_grid/grid_2x2.sumocfg
+grid_routes_file: intersection_grid/grid_2x2_routes.rou.xml
