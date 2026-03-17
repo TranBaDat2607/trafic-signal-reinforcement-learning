@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from numpy.typing import NDArray
@@ -21,13 +22,21 @@ class Record:
     reward: float
 
 
-def run_episode(env: Environment, agent: Agent, seed: int) -> tuple[list[Record], list[EnvStats]]:
+def run_episode(
+    env: Environment,
+    agent: Agent,
+    seed: int,
+    on_step: Callable[[], None] | None = None,
+) -> tuple[list[Record], list[EnvStats]]:
     """Runs one episode and returns per-step records and environment statistics.
 
     Args:
         env: Environment to interact with.
         agent: Agent used to select actions from states.
         seed: Seed used to generate the route file for this episode.
+        on_step: Optional callback invoked after every decision step.
+            Used to interleave training with simulation so that GPU work
+            is distributed evenly instead of batched after the episode.
 
     Returns:
         A tuple (history, env_stats) where:
@@ -55,6 +64,9 @@ def run_episode(env: Environment, agent: Agent, seed: int) -> tuple[list[Record]
 
         record = Record(state=state, action=action, reward=reward)
         history.append(record)
+
+        if on_step is not None:
+            on_step()
 
     env.deactivate()
 

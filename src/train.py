@@ -91,16 +91,17 @@ def training_session(settings_file: Path, out_path: Path) -> None:
             sumocfg_file=settings.sumocfg_file,
         )
 
-        episode_history, env_stats = run_episode(env=env, agent=agent, seed=episode)
+        def on_step() -> None:
+            for _ in range(settings.training_epochs):
+                agent.replay(
+                    memory=memory,
+                    gamma=settings.gamma,
+                    batch_size=settings.batch_size,
+                )
+
+        episode_history, env_stats = run_episode(env=env, agent=agent, seed=episode, on_step=on_step)
 
         add_experience_to_memory(memory=memory, history=episode_history)
-
-        for _ in range(settings.training_epochs):
-            agent.replay(
-                memory=memory,
-                gamma=settings.gamma,
-                batch_size=settings.batch_size,
-            )
 
         training_stats = update_training_stats(
             episode_history=episode_history,

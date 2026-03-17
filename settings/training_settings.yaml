@@ -12,7 +12,7 @@ num_layers: 4
 width_layers: 400
 batch_size: 100
 learning_rate: 0.001
-training_epochs: 800
+training_epochs: 1
 
 # memory
 memory_size_min: 600
