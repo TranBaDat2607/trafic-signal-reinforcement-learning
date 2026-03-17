@@ -45,8 +45,7 @@ class Agent:
                 model_path=model_path,
             )
         self.policy = EpsilonGreedyPolicy(self.model, NUM_ACTIONS, epsilon)
-        self.target_update_interval = settings.target_update_interval
-        self._replay_count = 0
+        self.tau = settings.tau
 
     @property
     def epsilon(self) -> float:
@@ -101,10 +100,7 @@ class Agent:
             y[i, sample.action] = target
 
         self.model.train_batch(x, y)
-
-        self._replay_count += 1
-        if self._replay_count % self.target_update_interval == 0:
-            self.model.update_target_network()
+        self.model.update_target_network(self.tau)
 
     def save_model(self, out_path: Path) -> None:
         """Save the underlying model weights to disk.

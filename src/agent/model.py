@@ -171,9 +171,19 @@ class Model:
             outputs = self.target_model(torch.from_numpy(arr).to(self.device))
             return outputs.cpu().numpy()
 
-    def update_target_network(self) -> None:
-        """Copy online network weights into the frozen target network."""
-        self.target_model.load_state_dict(self.model.state_dict())
+    def update_target_network(self, tau: float = 0.005) -> None:
+        """Blend online network weights into the target network via Polyak averaging.
+
+        With tau=1.0 this degenerates to a hard copy (original behaviour).
+        With tau≈0.005 the target moves smoothly, avoiding the abrupt jumps
+        that a periodic hard copy introduces.
+
+        Args:
+            tau: Interpolation factor in (0, 1].  Target keeps (1-tau) of its
+                 current weights and absorbs tau of the online weights each call.
+        """
+        for p_online, p_target in zip(self.model.parameters(), self.target_model.parameters()):
+            p_target.data.mul_(1.0 - tau).add_(tau * p_online.data)
 
     def train_batch(self, states: NDArray, q_sa: NDArray) -> None:
         """Train the model for one step on a batch.

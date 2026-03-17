@@ -30,7 +30,7 @@ class TrainingSettings(BaseModel):
 
     # agent
     gamma: Annotated[float, Field(ge=0, le=1)]
-    target_update_interval: PositiveInt
+    tau: Annotated[float, Field(gt=0, le=1)]
     checkpoint_interval: NonNegativeInt
 
     # paths
