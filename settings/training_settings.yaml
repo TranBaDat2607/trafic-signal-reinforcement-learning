@@ -20,8 +20,9 @@ memory_size_max: 50000
 
 # agent
 gamma: 0.75
-target_update_interval: 100
+tau: 0.005
 checkpoint_interval: 0
+early_stopping_patience: 0  # episodes with no reward improvement before stopping (0 = disabled)
 
 # paths
 sumocfg_file: intersection/sumo_config.sumocfg

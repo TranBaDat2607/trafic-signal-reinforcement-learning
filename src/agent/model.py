@@ -12,6 +12,70 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
+class EarlyStopping:
+    """Monitors a scalar metric and signals when training should stop.
+
+    Tracks the *maximum* of the monitored metric (e.g. cumulative reward,
+    which is negative and should increase toward zero as the agent improves).
+    Stops when no improvement greater than ``min_delta`` is seen for
+    ``patience`` consecutive episodes.
+
+    Set ``patience=0`` to disable early stopping entirely.
+
+    Args:
+        patience: Number of consecutive episodes without improvement before
+            stopping.  ``0`` disables early stopping.
+        min_delta: Minimum change to qualify as an improvement.
+
+    Example::
+
+        es = EarlyStopping(patience=10)
+        for episode in range(total):
+            metric = run_episode()
+            if es.step(metric):
+                break  # no improvement for 10 episodes
+            if es.improved:
+                save_best_model()
+    """
+
+    def __init__(self, patience: int, min_delta: float = 0.0) -> None:
+        self.patience = patience
+        self.min_delta = min_delta
+        self._best: float = -float("inf")
+        self._no_improve_count: int = 0
+
+    @property
+    def improved(self) -> bool:
+        """True immediately after a :meth:`step` call that set a new best."""
+        return self._no_improve_count == 0
+
+    @property
+    def best(self) -> float:
+        """Best metric value seen so far."""
+        return self._best
+
+    @property
+    def no_improve_count(self) -> int:
+        """Number of consecutive episodes without improvement."""
+        return self._no_improve_count
+
+    def step(self, metric: float) -> bool:
+        """Record a new metric value and check the stopping criterion.
+
+        Args:
+            metric: Latest episode metric (higher = better).
+
+        Returns:
+            ``True`` if training should stop (patience exhausted).
+        """
+        if metric > self._best + self.min_delta:
+            self._best = metric
+            self._no_improve_count = 0
+        else:
+            self._no_improve_count += 1
+        return self.patience > 0 and self._no_improve_count >= self.patience
+
+
 class MLP(nn.Module):
     """Simple multi-layer perceptron with configurable depth and width."""
 

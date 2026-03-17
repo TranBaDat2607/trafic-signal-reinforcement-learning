@@ -12,7 +12,7 @@ num_layers: 4
 width_layers: 400
 batch_size: 100
 learning_rate: 0.001
-training_epochs: 800
+training_epochs: 1
 
 # memory
 memory_size_min: 600
@@ -20,8 +20,9 @@ memory_size_max: 50000
 
 # agent
 gamma: 0.75
-target_update_interval: 100
+tau: 0.005
 checkpoint_interval: 0
+early_stopping_patience: 0  # episodes with no reward improvement before stopping (0 = disabled)
 
 # paths (required by TrainingSettings base class)
 sumocfg_file: intersection_grid/grid_2x2.sumocfg

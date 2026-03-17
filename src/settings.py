@@ -32,6 +32,7 @@ class TrainingSettings(BaseModel):
     gamma: Annotated[float, Field(ge=0, le=1)]
     tau: Annotated[float, Field(gt=0, le=1)]
     checkpoint_interval: NonNegativeInt
+    early_stopping_patience: NonNegativeInt = 0  # 0 = disabled
 
     # paths
     sumocfg_file: Path

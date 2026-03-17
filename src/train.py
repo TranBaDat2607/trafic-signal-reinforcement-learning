@@ -7,6 +7,7 @@ from shutil import copyfile
 from typing import TypedDict
 
 from agent import Agent, Memory, Sample
+from agent.model import EarlyStopping
 from constants import DEFAULT_MODEL_PATH, DEFAULT_SETTINGS_PATH, TRAINING_SETTINGS_FILE
 from environment import Environment, EnvStats
 from episode import Record, run_episode
@@ -66,6 +67,8 @@ def training_session(settings_file: Path, out_path: Path) -> None:
     memory = Memory(size_max=settings.memory_size_max, size_min=settings.memory_size_min)
     agent = Agent(settings=settings)
 
+    early_stopping = EarlyStopping(patience=settings.early_stopping_patience)
+
     timestamp_start = datetime.now()
     tot_episodes = settings.total_episodes
 
@@ -119,6 +122,18 @@ def training_session(settings_file: Path, out_path: Path) -> None:
             out_path.mkdir(parents=True, exist_ok=True)
             agent.save_checkpoint(out_path, episode + 1)
             logger.info(f"\tCheckpoint saved: checkpoint_ep{episode + 1}.pt")
+
+        if early_stopping.step(training_stats["sum_neg_reward"][-1]):
+            logger.info(
+                f"\tEarly stopping triggered after {episode + 1} episodes "
+                f"(no improvement for {settings.early_stopping_patience} episodes, "
+                f"best reward: {early_stopping.best:.1f})"
+            )
+            break
+        if early_stopping.improved:
+            out_path.mkdir(parents=True, exist_ok=True)
+            agent.model.save_weights(out_path / "best_model.pt")
+            logger.info(f"\tNew best reward {early_stopping.best:.1f} — saved best_model.pt")
 
     out_path.mkdir(parents=True, exist_ok=True)
     agent.save_model(out_path)

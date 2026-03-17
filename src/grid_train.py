@@ -9,6 +9,7 @@ from shutil import copyfile
 from typing import TypedDict
 
 from constants import DEFAULT_MODEL_PATH, DEFAULT_SETTINGS_PATH
+from agent.model import EarlyStopping
 from grid.config import build_grid_config
 from grid.coordinator import AgentMode, MultiAgentCoordinator
 from grid.grid_env import GridEnvStats, GridEnvironment
@@ -110,6 +111,8 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
         epsilon=1.0,
     )
 
+    early_stopping = EarlyStopping(patience=settings.early_stopping_patience)
+
     timestamp_start = datetime.now()
     tot_episodes = settings.total_episodes
 
@@ -163,6 +166,18 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
                 safe = tl.replace("_", "") + f"_ep{episode + 1}.pt"
                 coordinator.agents[tl].save_checkpoint(out_path, episode + 1)
             logger.info(f"\tCheckpoint saved at episode {episode + 1}")
+
+        if early_stopping.step(training_stats["sum_neg_reward"][-1]):
+            logger.info(
+                f"\tEarly stopping triggered after {episode + 1} episodes "
+                f"(no improvement for {settings.early_stopping_patience} episodes, "
+                f"best reward: {early_stopping.best:.1f})"
+            )
+            break
+        if early_stopping.improved:
+            out_path.mkdir(parents=True, exist_ok=True)
+            coordinator.save_models(out_path / "best")
+            logger.info(f"\tNew best reward {early_stopping.best:.1f} — saved best/ models")
 
     out_path.mkdir(parents=True, exist_ok=True)
     coordinator.save_models(out_path)
