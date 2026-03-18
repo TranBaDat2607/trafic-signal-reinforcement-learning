@@ -241,28 +241,31 @@ def _exit_name(r: int, c: int, direction: str, n: int) -> str:
 # Connection generation
 # ---------------------------------------------------------------------------
 
-# Template: (from_dir, from_lane, to_dir, to_lane, via_suffix, link_index, dir_char, state_char)
+# Template: (from_dir, from_lane, to_dir, to_lane, via_suffix, via_lane, link_index, dir_char, state_char)
+# via_lane is the lane index within the internal edge.
+# Straight internal edges (1, 6, 11, 16) have 3 lanes — via_lane matches from_lane.
+# Turn internal edges (0, 4, 5, 9, 10, 14, 15, 19) have 1 lane — via_lane is always 0.
 _CONN_TEMPLATE = [
-    ("N", 0, "W", 0, "0", 0, "r", "O"),
-    ("N", 0, "S", 0, "1", 1, "s", "O"),
-    ("N", 1, "S", 1, "1", 2, "s", "O"),
-    ("N", 2, "S", 2, "1", 3, "s", "O"),
-    ("N", 3, "E", 3, "4", 4, "l", "o"),
-    ("E", 0, "N", 0, "5", 5, "r", "o"),
-    ("E", 0, "W", 0, "6", 6, "s", "o"),
-    ("E", 1, "W", 1, "6", 7, "s", "o"),
-    ("E", 2, "W", 2, "6", 8, "s", "o"),
-    ("E", 3, "S", 3, "9", 9, "l", "o"),
-    ("S", 0, "E", 0, "10", 10, "r", "O"),
-    ("S", 0, "N", 0, "11", 11, "s", "O"),
-    ("S", 1, "N", 1, "11", 12, "s", "O"),
-    ("S", 2, "N", 2, "11", 13, "s", "O"),
-    ("S", 3, "W", 3, "14", 14, "l", "o"),
-    ("W", 0, "S", 0, "15", 15, "r", "o"),
-    ("W", 0, "E", 0, "16", 16, "s", "o"),
-    ("W", 1, "E", 1, "16", 17, "s", "o"),
-    ("W", 2, "E", 2, "16", 18, "s", "o"),
-    ("W", 3, "N", 3, "19", 19, "l", "o"),
+    ("N", 0, "W", 0, "0",  0,  0, "r", "O"),
+    ("N", 0, "S", 0, "1",  0,  1, "s", "O"),
+    ("N", 1, "S", 1, "1",  1,  2, "s", "O"),
+    ("N", 2, "S", 2, "1",  2,  3, "s", "O"),
+    ("N", 3, "E", 3, "4",  0,  4, "l", "o"),
+    ("E", 0, "N", 0, "5",  0,  5, "r", "o"),
+    ("E", 0, "W", 0, "6",  0,  6, "s", "o"),
+    ("E", 1, "W", 1, "6",  1,  7, "s", "o"),
+    ("E", 2, "W", 2, "6",  2,  8, "s", "o"),
+    ("E", 3, "S", 3, "9",  0,  9, "l", "o"),
+    ("S", 0, "E", 0, "10", 0, 10, "r", "O"),
+    ("S", 0, "N", 0, "11", 0, 11, "s", "O"),
+    ("S", 1, "N", 1, "11", 1, 12, "s", "O"),
+    ("S", 2, "N", 2, "11", 2, 13, "s", "O"),
+    ("S", 3, "W", 3, "14", 0, 14, "l", "o"),
+    ("W", 0, "S", 0, "15", 0, 15, "r", "o"),
+    ("W", 0, "E", 0, "16", 0, 16, "s", "o"),
+    ("W", 1, "E", 1, "16", 1, 17, "s", "o"),
+    ("W", 2, "E", 2, "16", 2, 18, "s", "o"),
+    ("W", 3, "N", 3, "19", 0, 19, "l", "o"),
 ]
 
 # Internal (junction-box) to outgoing edge connections
@@ -297,10 +300,10 @@ def _connections_xml(r: int, c: int, n: int) -> str:
     lines: list[str] = []
 
     # External connections (incoming lane → junction box → outgoing edge)
-    for from_dir, from_lane, to_dir, to_lane, via_sfx, link_idx, dir_c, state_c in _CONN_TEMPLATE:
+    for from_dir, from_lane, to_dir, to_lane, via_sfx, via_lane, link_idx, dir_c, state_c in _CONN_TEMPLATE:
         from_edge = f"{from_dir}2TL_{r}_{c}"
         to_edge = _exit_name(r, c, to_dir, n)
-        via = f":{prefix}_{via_sfx}_0"
+        via = f":{prefix}_{via_sfx}_{via_lane}"
         lines.append(
             f'    <connection from="{from_edge}" to="{to_edge}"'
             f' fromLane="{from_lane}" toLane="{to_lane}"'

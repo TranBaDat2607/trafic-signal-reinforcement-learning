@@ -84,6 +84,8 @@ class GridEnvironment:
     def activate(self) -> None:
         """Start the SUMO simulation via TraCI."""
         self.step = 0
+        if traci.isLoaded():
+            traci.close()
         traci.start(self._build_sumo_cmd())
 
     def deactivate(self) -> None:

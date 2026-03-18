@@ -86,6 +86,8 @@ class Environment:
 
     def activate(self) -> None:
         """Start the SUMO simulation."""
+        if traci.isLoaded():
+            traci.close()
         traci.start(self.build_sumo_cmd())
 
     def deactivate(self) -> None:
