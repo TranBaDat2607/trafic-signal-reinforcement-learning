@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from shutil import copyfile
@@ -11,10 +12,11 @@ from typing import TypedDict
 from constants import DEFAULT_MODEL_PATH, DEFAULT_SETTINGS_PATH
 from agent.model import EarlyStopping
 from grid.config import build_grid_config
-from grid.coordinator import AgentMode, MultiAgentCoordinator
-from grid.grid_env import GridEnvStats, GridEnvironment
-from grid.grid_episode import GridRecord, run_grid_episode
+from grid.coordinator import MultiAgentCoordinator
+from grid.grid_env import GridEnvStats
+from grid.grid_episode import GridRecord
 from grid.network_gen import generate_grid_network, generate_grid_sumocfg
+from grid.parallel_worker import WorkerArgs, run_episode_worker
 from logger import get_logger
 from plots import save_data_and_plot
 from settings import load_grid_training_settings
@@ -55,7 +57,6 @@ def _update_stats(
     stats: GridTrainingStats,
 ) -> GridTrainingStats:
     """Update *stats* in-place with one episode's data and return it."""
-    # Sum negative rewards across all junctions and all steps
     neg_reward = sum(
         rec.reward
         for records in history.values()
@@ -64,7 +65,6 @@ def _update_stats(
     )
     stats["sum_neg_reward"].append(neg_reward)
 
-    # Sum queue lengths across all junctions and all steps
     total_queue = sum(
         sum(s.queue_lengths.values()) for s in env_stats
     )
@@ -77,15 +77,15 @@ def _update_stats(
 def grid_training_session(settings_file: Path, out_path: Path) -> None:
     """Run a full multi-agent training session and save results.
 
-    Generates the SUMO network and sumocfg if they do not already exist,
-    then runs *total_episodes* training episodes with linear epsilon decay.
+    Episodes are dispatched in parallel batches of ``num_parallel_episodes``
+    SUMO processes.  Each batch runs data collection simultaneously; the main
+    process then adds all experiences to the replay buffers and trains.
 
     Args:
         settings_file: Path to the grid training settings YAML.
         out_path: Directory for model weights and plots.
     """
     settings = load_grid_training_settings(settings_file)
-    mode: AgentMode = settings.mode  # type: ignore[assignment]
 
     # Ensure network files exist
     grid_dir = settings.grid_net_file.parent
@@ -107,7 +107,6 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
     coordinator = MultiAgentCoordinator(
         tl_ids=grid_cfg.tl_ids,
         settings=settings,
-        mode=mode,
         epsilon=1.0,
     )
 
@@ -115,6 +114,10 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
 
     timestamp_start = datetime.now()
     tot_episodes = settings.total_episodes
+    n_parallel = settings.num_parallel_episodes
+    routes_dir = settings.grid_routes_file.parent
+    project_root = str(Path.cwd())
+    src_path = str(Path(__file__).resolve().parent)
 
     training_stats: GridTrainingStats = {
         "sum_neg_reward": [],
@@ -122,62 +125,80 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
         "avg_queue_length": [],
     }
 
-    for episode in range(tot_episodes):
-        logger.info(f"Episode {episode + 1} of {tot_episodes}")
+    should_stop = False
+    episode_idx = 0
 
-        new_epsilon = round(1.0 - (episode / tot_episodes), 2)
-        coordinator.set_epsilon(new_epsilon)
+    with ProcessPoolExecutor(max_workers=n_parallel) as pool:
+        while episode_idx < tot_episodes and not should_stop:
+            batch_count = min(n_parallel, tot_episodes - episode_idx)
+            new_epsilon = round(1.0 - (episode_idx / tot_episodes), 2)
+            coordinator.set_epsilon(new_epsilon)
+            weights = coordinator.get_weights()
 
-        env = GridEnvironment(
-            grid_cfg=grid_cfg,
-            n_cars_generated=settings.n_cars_generated,
-            max_steps=settings.max_steps,
-            yellow_duration=settings.yellow_duration,
-            green_duration=settings.green_duration,
-            turn_chance=settings.turn_chance,
-            gui=settings.gui,
-        )
-
-        history, env_stats = run_grid_episode(
-            env=env,
-            coordinator=coordinator,
-            mode=mode,
-            seed=episode,
-        )
-
-        _add_experiences(coordinator, history)
-
-        coordinator.replay_all(
-            gamma=settings.gamma,
-            batch_size=settings.batch_size,
-            training_epochs=settings.training_epochs,
-        )
-
-        training_stats = _update_stats(history, env_stats, settings.max_steps, training_stats)
-
-        logger.info(f"\tEpsilon: {new_epsilon}")
-        logger.info(f"\tReward: {training_stats['sum_neg_reward'][-1]}")
-        logger.info(f"\tCumulative wait: {training_stats['cumulative_wait'][-1]}")
-        logger.info(f"\tAvg queue: {training_stats['avg_queue_length'][-1]}")
-
-        if settings.checkpoint_interval > 0 and (episode + 1) % settings.checkpoint_interval == 0:
-            out_path.mkdir(parents=True, exist_ok=True)
-            for tl in grid_cfg.tl_ids:
-                safe = tl.replace("_", "") + f"_ep{episode + 1}.pt"
-                coordinator.agents[tl].save_checkpoint(out_path, episode + 1)
-            logger.info(f"\tCheckpoint saved at episode {episode + 1}")
-
-        if early_stopping.step(training_stats["sum_neg_reward"][-1]):
             logger.info(
-                f"\tEarly stopping triggered after {episode + 1} episodes "
-                f"(no improvement for {settings.early_stopping_patience} episodes, "
-                f"best reward: {early_stopping.best:.1f})"
+                f"Episodes {episode_idx + 1}–{episode_idx + batch_count} of {tot_episodes} "
+                f"(ε={new_epsilon}, {batch_count} parallel workers)"
             )
-            break
-        if early_stopping.improved:
-            out_path.mkdir(parents=True, exist_ok=True)
-            coordinator.save_models(out_path / "best")
-            logger.info(f"\tNew best reward {early_stopping.best:.1f} — saved best/ models")
+
+            # Build one WorkerArgs per parallel episode with a unique routes file
+            worker_args = [
+                WorkerArgs(
+                    seed=episode_idx + i,
+                    epsilon=new_epsilon,
+                    weights_np=weights,
+                    settings=settings,
+                    grid_cfg=grid_cfg,
+                    routes_path=routes_dir / f"routes_w{i}.rou.xml",
+                    project_root=project_root,
+                    src_path=src_path,
+                )
+                for i in range(batch_count)
+            ]
+
+            # Run all episodes in parallel, collect results
+            results = list(pool.map(run_episode_worker, worker_args))
+
+            # Add experiences from every episode and train once per batch
+            for history, env_stats in results:
+                _add_experiences(coordinator, history)
+                _update_stats(history, env_stats, settings.max_steps, training_stats)
+
+            coordinator.replay_all(
+                gamma=settings.gamma,
+                batch_size=settings.batch_size,
+                training_epochs=settings.training_epochs,
+            )
+
+            # Log and check early stopping for each episode in the batch
+            for i in range(batch_count):
+                ep_num = episode_idx + i + 1
+                ep_reward = training_stats["sum_neg_reward"][episode_idx + i]
+                ep_queue = training_stats["avg_queue_length"][episode_idx + i]
+                logger.info(
+                    f"\tEp {ep_num}: reward={ep_reward:.1f}  avg_queue={ep_queue:.1f}"
+                )
+
+                if settings.checkpoint_interval > 0 and ep_num % settings.checkpoint_interval == 0:
+                    out_path.mkdir(parents=True, exist_ok=True)
+                    coordinator.save_models(out_path / f"checkpoint_ep{ep_num}")
+                    logger.info(f"\tCheckpoint saved at episode {ep_num}")
+
+                if ep_num >= settings.early_stopping_min_episode:
+                    if early_stopping.step(ep_reward):
+                        logger.info(
+                            f"\tEarly stopping triggered after {ep_num} episodes "
+                            f"(no improvement for {settings.early_stopping_patience} episodes, "
+                            f"best reward: {early_stopping.best:.1f})"
+                        )
+                        should_stop = True
+                        break
+
+                    if early_stopping.improved:
+                        out_path.mkdir(parents=True, exist_ok=True)
+                        coordinator.save_models(out_path / "best")
+                        logger.info(f"\tNew best reward {early_stopping.best:.1f} — saved best/ models")
+
+            episode_idx += batch_count
 
     out_path.mkdir(parents=True, exist_ok=True)
     coordinator.save_models(out_path)

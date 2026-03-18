@@ -18,7 +18,7 @@ from constants import ACTION_TO_TL_PHASE, TL_GREEN_TO_YELLOW
 from grid.config import GridConfig
 from grid.reward import get_intersection_cumulated_waiting_time, get_intersection_queue_length
 from grid.route_gen import generate_grid_routefile
-from grid.state import get_intersection_state, get_neighbor_aware_state
+from grid.state import get_intersection_state
 
 
 @dataclass
@@ -54,6 +54,7 @@ class GridEnvironment:
         green_duration: int,
         turn_chance: float,
         gui: bool,
+        routes_override: Path | None = None,
     ) -> None:
         self.grid_cfg = grid_cfg
         self.n_cars_generated = n_cars_generated
@@ -62,6 +63,7 @@ class GridEnvironment:
         self.green_duration = green_duration
         self.turn_chance = turn_chance
         self.gui = gui
+        self.routes_override = routes_override
         self.step = 0
 
     # ------------------------------------------------------------------
@@ -74,12 +76,15 @@ class GridEnvironment:
         if not cfg.exists():
             msg = f"SUMO config not found at '{cfg}'"
             raise FileNotFoundError(msg)
-        return [
+        cmd = [
             sumo_binary,
             "-c", str(cfg),
             "--no-step-log", "true",
             "--waiting-time-memory", str(self.max_steps),
         ]
+        if self.routes_override is not None:
+            cmd += ["--route-files", str(self.routes_override)]
+        return cmd
 
     def activate(self) -> None:
         """Start the SUMO simulation via TraCI."""
@@ -99,12 +104,17 @@ class GridEnvironment:
     def generate_routefile(self, seed: int) -> None:
         """Generate the episode route file.
 
+        If ``routes_override`` was set, writes to that path instead of the
+        default ``grid_cfg.routes_file``.  SUMO will be told to load from the
+        same path via ``--route-files``.
+
         Args:
             seed: Random seed for route generation.
         """
+        out_path = self.routes_override if self.routes_override is not None else self.grid_cfg.routes_file
         generate_grid_routefile(
             n=self.grid_cfg.n,
-            out_path=self.grid_cfg.routes_file,
+            out_path=out_path,
             seed=seed,
             n_cars=self.n_cars_generated,
             max_steps=self.max_steps,
@@ -125,17 +135,6 @@ class GridEnvironment:
             tl: get_intersection_state(self.grid_cfg.intersections[tl])
             for tl in self.grid_cfg.tl_ids
         }
-
-    def get_neighbor_aware_state(self, tl_id: str) -> NDArray:
-        """Return the 1200-element neighbour-aware state vector for *tl_id*.
-
-        Args:
-            tl_id: Target junction ID.
-
-        Returns:
-            Array of shape ``(1200,)``.
-        """
-        return get_neighbor_aware_state(tl_id, self.grid_cfg)
 
     def get_cumulated_waiting_time(self, tl_id: str) -> float:
         """Total accumulated waiting time on the junction's incoming edges.

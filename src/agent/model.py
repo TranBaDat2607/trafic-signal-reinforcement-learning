@@ -170,6 +170,12 @@ class Model:
         for param in self.target_model.parameters():
             param.requires_grad = False
 
+        # CPU shadow for single-sample inference (avoids GPU round-trip overhead)
+        self.inference_model: MLP = copy.deepcopy(self.model).cpu()
+        self.inference_model.eval()
+        for p in self.inference_model.parameters():
+            p.requires_grad = False
+
         self.loss_fn = nn.HuberLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
@@ -198,7 +204,7 @@ class Model:
             return outputs.cpu().numpy()
 
     def predict_one(self, state: NDArray) -> NDArray:
-        """Predict Q-values for a single state.
+        """Predict Q-values for a single state — always runs on CPU.
 
         Args:
             state: 1-D array of shape (input_dim,).
@@ -206,8 +212,11 @@ class Model:
         Returns:
             Array of shape (1, output_dim).
         """
-        state_2d = np.asarray(state, dtype=np.float32).reshape(1, self.input_dim)
-        return self._predict(state_2d)
+        with torch.no_grad():
+            t = torch.from_numpy(
+                np.asarray(state, dtype=np.float32).reshape(1, self.input_dim)
+            )
+            return self.inference_model(t).numpy()
 
     def predict_batch(self, states: NDArray) -> NDArray:
         """Predict Q-values for a batch of states.
@@ -248,6 +257,48 @@ class Model:
         """
         for p_online, p_target in zip(self.model.parameters(), self.target_model.parameters()):
             p_target.data.mul_(1.0 - tau).add_(tau * p_online.data)
+        # Sync CPU shadow (cheap: ~80 KB for this MLP)
+        for p_cpu, p_online in zip(self.inference_model.parameters(), self.model.parameters()):
+            p_cpu.data.copy_(p_online.data.cpu())
+
+    def forward_online(self, states_t: Tensor) -> Tensor:
+        """Eval forward pass on a GPU tensor, returning a GPU tensor.
+
+        Args:
+            states_t: Tensor of shape (batch_size, input_dim) already on device.
+
+        Returns:
+            Q-value tensor of shape (batch_size, output_dim) on device.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            return self.model(states_t)
+
+    def forward_target(self, states_t: Tensor) -> Tensor:
+        """Target network eval forward pass on a GPU tensor.
+
+        Args:
+            states_t: Tensor of shape (batch_size, input_dim) already on device.
+
+        Returns:
+            Q-value tensor of shape (batch_size, output_dim) on device.
+        """
+        self.target_model.eval()
+        with torch.no_grad():
+            return self.target_model(states_t)
+
+    def train_on_tensors(self, states_t: Tensor, targets_t: Tensor) -> None:
+        """Gradient step using pre-built GPU tensors (no CPU conversion).
+
+        Args:
+            states_t: Input states already on device.
+            targets_t: Target Q-values already on device.
+        """
+        self.model.train()
+        self.optimizer.zero_grad()
+        loss = self.loss_fn(self.model(states_t), targets_t)
+        loss.backward()
+        self.optimizer.step()
 
     def train_batch(self, states: NDArray, q_sa: NDArray) -> None:
         """Train the model for one step on a batch.
@@ -286,3 +337,15 @@ class Model:
         """
         file_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), file_path)
+
+    def load_state_dict_np(self, weights_np: dict[str, NDArray]) -> None:
+        """Load online model weights from numpy arrays and sync the CPU shadow.
+
+        Args:
+            weights_np: Mapping from parameter name to numpy array (as returned
+                by :meth:`~coordinator.MultiAgentCoordinator.get_weights`).
+        """
+        state_dict = {k: torch.from_numpy(v) for k, v in weights_np.items()}
+        self.model.load_state_dict(state_dict)
+        for p_cpu, p_online in zip(self.inference_model.parameters(), self.model.parameters()):
+            p_cpu.data.copy_(p_online.data.cpu())

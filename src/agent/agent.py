@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from agent.memory import Memory
 from agent.model import Model
@@ -18,7 +19,6 @@ class Agent:
         epsilon: float = 1.0,
         model_path: Path | None = None,
         model: "Model | None" = None,
-        input_dim: int | None = None,
     ) -> None:
         """Initialize the agent, its model, and the epsilon-greedy policy.
 
@@ -28,11 +28,8 @@ class Agent:
             model_path: Optional path to load pre-trained model weights from.
             model: Optional pre-built :class:`~agent.model.Model` to share
                 (used for SharedParameters multi-agent mode).  When provided,
-                *model_path* and *input_dim* are ignored.
-            input_dim: Override the default ``STATE_SIZE`` input dimension
-                (used for NeighborAware multi-agent mode).
+                *model_path* is ignored.
         """
-        effective_dim = input_dim if input_dim is not None else STATE_SIZE
         if model is not None:
             self.model = model
         else:
@@ -40,7 +37,7 @@ class Agent:
                 num_layers=settings.num_layers,
                 width=settings.width_layers,
                 learning_rate=settings.learning_rate,
-                input_dim=effective_dim,
+                input_dim=STATE_SIZE,
                 output_dim=NUM_ACTIONS,
                 model_path=model_path,
             )
@@ -84,22 +81,31 @@ class Agent:
         if not batch:
             return
 
-        states = np.array([sample.state for sample in batch])
-        next_states = np.array([sample.next_state for sample in batch])
+        device = self.model.device
 
-        q_values = self.model.predict_batch(states)
-        # Use frozen target network to compute stable bootstrap targets.
-        next_q_values = self.model.predict_batch_target(next_states)
+        # Transfer states to GPU once — reused for both inference and training.
+        states_t = torch.from_numpy(
+            np.array([s.state for s in batch], dtype=np.float32)
+        ).to(device, non_blocking=True)
+        next_states_t = torch.from_numpy(
+            np.array([s.next_state for s in batch], dtype=np.float32)
+        ).to(device, non_blocking=True)
 
-        x = states
-        y = q_values.copy()
+        # Both forward passes stay on GPU — no round-trip to CPU.
+        q_values_t = self.model.forward_online(states_t)
+        next_q_values_t = self.model.forward_target(next_states_t)
 
-        for i, sample in enumerate(batch):
-            # Q-learning target: r + gamma * max_a' Q_target(s', a')
-            target = sample.reward + gamma * np.max(next_q_values[i])
-            y[i, sample.action] = target
+        # Bellman targets computed entirely on GPU (vectorised, no Python loop).
+        rewards_t = torch.tensor(
+            [s.reward for s in batch], dtype=torch.float32, device=device
+        )
+        actions = [s.action for s in batch]
+        targets_t = q_values_t.clone()
+        targets_t[torch.arange(len(batch), device=device), actions] = (
+            rewards_t + gamma * next_q_values_t.max(dim=1).values
+        )
 
-        self.model.train_batch(x, y)
+        self.model.train_on_tensors(states_t, targets_t)
         self.model.update_target_network(self.tau)
 
     def save_model(self, out_path: Path) -> None:

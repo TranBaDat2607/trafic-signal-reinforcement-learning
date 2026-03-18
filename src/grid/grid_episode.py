@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from numpy.typing import NDArray
 
-from grid.coordinator import AgentMode, MultiAgentCoordinator
+from grid.coordinator import MultiAgentCoordinator
 from grid.grid_env import GridEnvStats, GridEnvironment
 
 
@@ -30,16 +31,17 @@ class GridRecord:
 def run_grid_episode(
     env: GridEnvironment,
     coordinator: MultiAgentCoordinator,
-    mode: AgentMode,
     seed: int,
+    on_step: Callable[[], None] | None = None,
 ) -> tuple[dict[str, list[GridRecord]], list[GridEnvStats]]:
     """Run one training episode in the grid environment.
 
     Args:
         env: Grid environment to interact with.
         coordinator: Multi-agent coordinator that holds all agents.
-        mode: Operating mode determining how states are collected.
         seed: Seed for route file generation.
+        on_step: Optional callback invoked at the end of every decision step
+            (e.g. to trigger an interleaved replay).
 
     Returns:
         A tuple ``(history, env_stats)`` where:
@@ -57,11 +59,7 @@ def run_grid_episode(
     previous_wait: dict[str, float] = {tl: 0.0 for tl in env.grid_cfg.tl_ids}
 
     while not env.is_over():
-        # Collect states (mode-dependent)
-        if mode == "NeighborAware":
-            states = {tl: env.get_neighbor_aware_state(tl) for tl in env.grid_cfg.tl_ids}
-        else:
-            states = env.get_states()
+        states = env.get_states()
 
         actions = coordinator.choose_actions(states)
         step_stats = env.execute(actions)
@@ -78,6 +76,9 @@ def run_grid_episode(
                 action=actions[tl],
                 reward=reward,
             ))
+
+        if on_step is not None:
+            on_step()
 
     env.deactivate()
     return history, env_stats

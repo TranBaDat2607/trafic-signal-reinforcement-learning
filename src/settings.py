@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Self
 
 import yaml
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveFloat, PositiveInt, model_validator
@@ -33,6 +33,7 @@ class TrainingSettings(BaseModel):
     tau: Annotated[float, Field(gt=0, le=1)]
     checkpoint_interval: NonNegativeInt
     early_stopping_patience: NonNegativeInt = 0  # 0 = disabled
+    early_stopping_min_episode: NonNegativeInt = 0  # don't count patience before this episode
 
     # paths
     sumocfg_file: Path
@@ -123,7 +124,7 @@ class GridTrainingSettings(TrainingSettings):
 
     grid_n: PositiveInt = 2
     junction_spacing: PositiveInt = 1500
-    mode: Literal["Independent", "SharedParameters", "NeighborAware"] = "Independent"
+    num_parallel_episodes: PositiveInt = 1
     grid_net_file: Path = Path("intersection_grid/grid_2x2.net.xml")
     grid_sumocfg_file: Path = Path("intersection_grid/grid_2x2.sumocfg")
     grid_routes_file: Path = Path("intersection_grid/grid_2x2_routes.rou.xml")

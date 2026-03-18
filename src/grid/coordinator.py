@@ -1,20 +1,16 @@
 """Multi-agent coordinator for NxN intersection grids.
 
-Supports three operating modes:
-
-* **Independent** — each intersection has its own model and memory.
-* **SharedParameters** — all intersections share one model object; gradients
-  accumulate across all N² replay calls per epoch.
-* **NeighborAware** — like Independent but the state vector is the 5×240
-  concatenation of the target junction and its four neighbours.
+All intersections share one model object (SharedParameters mode); gradients
+accumulate across all N² replay calls per epoch.
 """
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
+import torch
 from numpy.typing import NDArray
 
 from agent import Agent, Memory, Sample
@@ -22,19 +18,15 @@ from agent.model import Model
 from constants import NUM_ACTIONS, STATE_SIZE
 from settings import GridTrainingSettings
 
-AgentMode = Literal["Independent", "SharedParameters", "NeighborAware"]
-
-_NEIGHBOR_AWARE_DIM = STATE_SIZE * 5  # 1200
-
 
 class MultiAgentCoordinator:
     """Coordinates a collection of DQN agents for multi-intersection control.
 
+    All agents share a single model (SharedParameters mode).
+
     Args:
         tl_ids: Ordered list of junction IDs (row-major).
         settings: Grid training settings (model architecture, memory sizes, …).
-        mode: Operating mode — one of ``"Independent"``, ``"SharedParameters"``,
-            or ``"NeighborAware"``.
         epsilon: Initial exploration probability for all agents.
     """
 
@@ -42,14 +34,12 @@ class MultiAgentCoordinator:
         self,
         tl_ids: list[str],
         settings: GridTrainingSettings,
-        mode: AgentMode,
         epsilon: float = 1.0,
     ) -> None:
         self.tl_ids = tl_ids
         self.settings = settings
-        self.mode = mode
 
-        # Build memories (one per junction for all modes)
+        # Build memories (one per junction)
         self.memories: dict[str, Memory] = {
             tl: Memory(
                 size_max=settings.memory_size_max,
@@ -58,32 +48,18 @@ class MultiAgentCoordinator:
             for tl in tl_ids
         }
 
-        # Build agents
-        self.agents: dict[str, Agent] = {}
-
-        if mode == "SharedParameters":
-            # One shared model; all agents point to the same object.
-            shared_model = Model(
-                num_layers=settings.num_layers,
-                width=settings.width_layers,
-                learning_rate=settings.learning_rate,
-                input_dim=STATE_SIZE,
-                output_dim=NUM_ACTIONS,
-            )
-            for tl in tl_ids:
-                self.agents[tl] = Agent(settings, epsilon=epsilon, model=shared_model)
-
-        elif mode == "NeighborAware":
-            for tl in tl_ids:
-                self.agents[tl] = Agent(
-                    settings,
-                    epsilon=epsilon,
-                    input_dim=_NEIGHBOR_AWARE_DIM,
-                )
-
-        else:  # Independent
-            for tl in tl_ids:
-                self.agents[tl] = Agent(settings, epsilon=epsilon)
+        # One shared model; all agents point to the same object.
+        shared_model = Model(
+            num_layers=settings.num_layers,
+            width=settings.width_layers,
+            learning_rate=settings.learning_rate,
+            input_dim=STATE_SIZE,
+            output_dim=NUM_ACTIONS,
+        )
+        self.agents: dict[str, Agent] = {
+            tl: Agent(settings, epsilon=epsilon, model=shared_model)
+            for tl in tl_ids
+        }
 
     # ------------------------------------------------------------------
     # Episode helpers
@@ -92,13 +68,37 @@ class MultiAgentCoordinator:
     def choose_actions(self, states: dict[str, NDArray]) -> dict[str, int]:
         """Select actions for all junctions.
 
+        Exploring junctions pick a random action.  Exploiting junctions are
+        batched into a single CPU forward pass (SharedParameters mode) or
+        handled individually via the CPU inference shadow (other modes).
+
         Args:
             states: Mapping from TL ID to its current state vector.
 
         Returns:
             Mapping from TL ID to chosen action index.
         """
-        return {tl: self.agents[tl].choose_action(states[tl]) for tl in self.tl_ids}
+        actions: dict[str, int] = {}
+        exploit_ids: list[str] = []
+        exploit_states: list[NDArray] = []
+
+        for tl in self.tl_ids:
+            if random.random() < self.agents[tl].epsilon:
+                actions[tl] = random.randrange(NUM_ACTIONS)
+            else:
+                exploit_ids.append(tl)
+                exploit_states.append(states[tl])
+
+        if exploit_ids:
+            arr = np.array(exploit_states, dtype=np.float32)
+            t = torch.from_numpy(arr)
+            ref_model = self.agents[self.tl_ids[0]].model
+            with torch.no_grad():
+                q = ref_model.inference_model(t).numpy()
+            for i, tl in enumerate(exploit_ids):
+                actions[tl] = int(np.argmax(q[i]))
+
+        return actions
 
     def add_experience(
         self,
@@ -146,21 +146,35 @@ class MultiAgentCoordinator:
         for agent in self.agents.values():
             agent.set_epsilon(epsilon)
 
+    def get_weights(self) -> dict[str, dict[str, NDArray]]:
+        """Return current online model weights as picklable numpy arrays.
+
+        Returns:
+            Mapping from TL ID to a state-dict of numpy arrays.
+        """
+        shared = {
+            k: v.cpu().numpy()
+            for k, v in self.agents[self.tl_ids[0]].model.model.state_dict().items()
+        }
+        return {tl: shared for tl in self.tl_ids}
+
+    def load_weights(self, weights: dict[str, dict[str, NDArray]]) -> None:
+        """Load online model weights from numpy arrays.
+
+        Only one model object is updated (all agents share it).
+
+        Args:
+            weights: Mapping from TL ID to state-dict of numpy arrays.
+        """
+        self.agents[self.tl_ids[0]].model.load_state_dict_np(weights[self.tl_ids[0]])
+
     def save_models(self, out_path: Path) -> None:
         """Save model weights to *out_path*.
 
-        In SharedParameters mode only one file is written (all agents share
-        the same weights).  In other modes one file per junction is written.
+        Writes a single ``shared_model.pt`` (all agents share the same weights).
 
         Args:
             out_path: Directory to write model files into.
         """
         out_path.mkdir(parents=True, exist_ok=True)
-
-        if self.mode == "SharedParameters":
-            # Save the single shared model once
-            self.agents[self.tl_ids[0]].model.save_weights(out_path / "shared_model.pt")
-        else:
-            for tl in self.tl_ids:
-                safe_name = tl.replace("_", "") + "_model.pt"
-                self.agents[tl].model.save_weights(out_path / safe_name)
+        self.agents[self.tl_ids[0]].model.save_weights(out_path / "shared_model.pt")
