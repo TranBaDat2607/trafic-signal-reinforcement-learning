@@ -22,7 +22,7 @@ import traci
 import yaml
 from sumolib import checkBinary
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from constants import INCOMING_EDGES
 from environment.generator import generate_routefile
