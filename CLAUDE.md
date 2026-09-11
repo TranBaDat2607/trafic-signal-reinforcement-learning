@@ -26,9 +26,15 @@ mypy src/
 
 # Format
 ruff format src/
+
+# Test
+pytest
 ```
 
-There are no automated tests. The import smoke-test from the root:
+Unit tests cover the shared metric definitions (`tests/test_metrics.py`); they
+need neither SUMO nor a trained model. Everything else is verified by running.
+
+The import smoke-test from the root:
 
 ```bash
 cd src && python -c "
@@ -37,6 +43,7 @@ from agent import Agent, Memory, Sample
 from policy import EpsilonGreedyPolicy
 from episode import Record, run_episode
 from settings import load_training_settings, load_testing_settings
+from metrics import total_delay, avg_queue, sum_negative_rewards
 from plots import save_data_and_plot
 print('All imports OK')
 "
@@ -49,6 +56,7 @@ The codebase separates the three standard RL components into distinct sub-packag
 ```
 src/
 ├── constants.py          # All magic numbers, lane geometry, TL phase IDs, paths
+├── metrics.py            # Episode metric definitions — shared by train/test/grid/baseline
 ├── settings.py           # Pydantic models (TrainingSettings, TestingSettings) + YAML loaders
 ├── logger.py             # RichHandler setup; configures root logger at import time
 ├── episode.py            # run_episode() — wires env + agent for one episode
@@ -71,9 +79,19 @@ src/
 ```
 
 **Dependency order** (no circular imports):
-`constants` → `logger` → `model` → `policy` → `memory` → `agent` → `environment` → `episode` → `train`
+`constants` → `logger` → `metrics` → `model` → `policy` → `memory` → `agent` → `environment` → `episode` → `train`
+
+(`metrics` depends on nothing — not on the project, not on TraCI. That is what lets
+`comparison/` import it and what makes it testable without SUMO.)
 
 **Key design decisions:**
+- `metrics.py` is the single definition of every episode-level number that gets
+  reported. `train.py`, `test.py`, `grid_train.py` and `comparison/run_baseline.py`
+  all import it, so the agent and the fixed-time baseline are scored by the same
+  function. Do not add a fourth aggregation — that is exactly how the units came
+  apart before (PROBLEMS.md P0-1/P0-2). `total_delay` is vehicle-seconds; the
+  negative-reward sum is a *training diagnostic* and must never be plotted against
+  a baseline.
 - `policy/` is intentionally separate from `agent/` so the exploration rule can be swapped without touching the Q-learning update.
 - `environment/state.py` and `environment/reward.py` are pure functions (no instance state) — they call TraCI directly, making them testable without a live SUMO process.
 - `agent/model.py` saves/loads via `state_dict` (not pickle). Saved `.pt` files from the original project are **not compatible**.
@@ -85,7 +103,8 @@ src/
 |------|-----------|-------|
 | `intersection/episode_routes.rou.xml` | `generator.py` at episode start | Do not commit |
 | `model/trained_model.pt` | `train.py` after training | Weights only (state_dict) |
-| `model/plot_*.png` / `model/plot_*_data.txt` | `plots.py` after training | Reward, delay, queue plots |
+| `model/plot_*.png` / `model/plot_*_data.txt` | `plots.py` after training | `delay` (vehicle-seconds) and `queue` are comparable to the baseline; `reward` is a training diagnostic only |
+| `comparison/archive/` | — | Results from before the metric fix; `compare_results.py` refuses them |
 
 ## Configuration
 

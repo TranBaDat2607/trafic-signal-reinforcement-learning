@@ -12,6 +12,14 @@ from constants import DEFAULT_MODEL_PATH, DEFAULT_SETTINGS_PATH, TRAINING_SETTIN
 from environment import Environment, EnvStats
 from episode import Record, run_episode
 from logger import get_logger
+from metrics import (
+    AVG_QUEUE_LABEL,
+    NEG_REWARD_LABEL,
+    TOTAL_DELAY_LABEL,
+    avg_queue,
+    sum_negative_rewards,
+    total_delay,
+)
 from plots import save_data_and_plot
 from settings import load_training_settings
 
@@ -19,11 +27,15 @@ logger = get_logger(__name__)
 
 
 class TrainingStats(TypedDict):
-    """Aggregated statistics collected during training episodes."""
+    """Aggregated per-episode statistics collected during training.
 
-    sum_neg_reward: list[float]
-    cumulative_wait: list[int]
-    avg_queue_length: list[float]
+    Metric definitions live in ``metrics.py`` so that the agent and the
+    fixed-time baseline are scored by the same function.
+    """
+
+    neg_reward: list[float]   # training diagnostic only, never a benchmark
+    total_delay: list[int]    # vehicle-seconds
+    avg_queue: list[float]    # vehicles
 
 
 def add_experience_to_memory(memory: Memory, history: list[Record]) -> None:
@@ -48,14 +60,13 @@ def update_training_stats(
     training_stats: TrainingStats,
 ) -> TrainingStats:
     """Update cumulative training statistics with metrics from one episode."""
-    sum_neg_reward = sum(record.reward for record in episode_history if record.reward < 0)
-    training_stats["sum_neg_reward"].append(sum_neg_reward)
+    queue_per_step = [stats.queue_length for stats in env_stats]
 
-    sum_queue_length = sum(stats.queue_length for stats in env_stats)
-    avg_queue_length = round(sum_queue_length / max_steps, 1)
-    training_stats["avg_queue_length"].append(avg_queue_length)
-
-    training_stats["cumulative_wait"].append(sum_queue_length)
+    training_stats["total_delay"].append(total_delay(queue_per_step))
+    training_stats["avg_queue"].append(avg_queue(queue_per_step, max_steps))
+    training_stats["neg_reward"].append(
+        sum_negative_rewards([record.reward for record in episode_history])
+    )
 
     return training_stats
 
@@ -73,9 +84,9 @@ def training_session(settings_file: Path, out_path: Path) -> None:
     tot_episodes = settings.total_episodes
 
     training_stats: TrainingStats = {
-        "sum_neg_reward": [],
-        "cumulative_wait": [],
-        "avg_queue_length": [],
+        "neg_reward": [],
+        "total_delay": [],
+        "avg_queue": [],
     }
 
     for episode in range(tot_episodes):
@@ -114,16 +125,16 @@ def training_session(settings_file: Path, out_path: Path) -> None:
         )
 
         logger.info(f"\tEpsilon: {agent.epsilon}")
-        logger.info(f"\tReward: {training_stats['sum_neg_reward'][-1]}")
-        logger.info(f"\tCumulative wait: {training_stats['cumulative_wait'][-1]}")
-        logger.info(f"\tAvg queue: {training_stats['avg_queue_length'][-1]}")
+        logger.info(f"\tTotal delay (vehicle-seconds): {training_stats['total_delay'][-1]}")
+        logger.info(f"\tAvg queue length: {training_stats['avg_queue'][-1]}")
+        logger.info(f"\tNeg-reward diagnostic: {training_stats['neg_reward'][-1]:.1f}")
 
         if settings.checkpoint_interval > 0 and (episode + 1) % settings.checkpoint_interval == 0:
             out_path.mkdir(parents=True, exist_ok=True)
             agent.save_checkpoint(out_path, episode + 1)
             logger.info(f"\tCheckpoint saved: checkpoint_ep{episode + 1}.pt")
 
-        if early_stopping.step(training_stats["sum_neg_reward"][-1]):
+        if early_stopping.step(training_stats["neg_reward"][-1]):
             logger.info(
                 f"\tEarly stopping triggered after {episode + 1} episodes "
                 f"(no improvement for {settings.early_stopping_patience} episodes, "
@@ -145,24 +156,24 @@ def training_session(settings_file: Path, out_path: Path) -> None:
     copyfile(src=settings_file, dst=out_path / TRAINING_SETTINGS_FILE)
 
     save_data_and_plot(
-        data=training_stats["sum_neg_reward"],
+        data=training_stats["neg_reward"],
         filename="reward",
         xlabel="Episode",
-        ylabel="Cumulative negative reward",
+        ylabel=NEG_REWARD_LABEL,
         out_folder=out_path,
     )
     save_data_and_plot(
-        data=training_stats["cumulative_wait"],
+        data=training_stats["total_delay"],
         filename="delay",
         xlabel="Episode",
-        ylabel="Cumulative delay (s)",
+        ylabel=TOTAL_DELAY_LABEL,
         out_folder=out_path,
     )
     save_data_and_plot(
-        data=training_stats["avg_queue_length"],
+        data=training_stats["avg_queue"],
         filename="queue",
         xlabel="Episode",
-        ylabel="Average queue length (vehicles)",
+        ylabel=AVG_QUEUE_LABEL,
         out_folder=out_path,
     )
 

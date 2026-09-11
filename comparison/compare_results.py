@@ -5,24 +5,35 @@ Vẽ biểu đồ so sánh:
   - Baseline (fixed-time) từ baseline_results/
   - RL agent         từ model/<run_name>/
 
-Ba biểu đồ:
-  1. Cumulative reward per episode
-  2. Cumulative waiting time per episode
-  3. Average queue length per episode
+Hai biểu đồ — chỉ vẽ những đại lượng được đo BẰNG CÙNG MỘT HÀM ở cả hai phía
+(src/metrics.py):
+  1. Total delay per episode  (vehicle-seconds)
+  2. Average queue length per episode  (vehicles)
 
-Cách dùng:
-    python compare_results.py --baseline baseline_results --rl model/run-01
-    python compare_results.py --baseline baseline_results --rl model/run-01 --out comparison/
+Reward KHÔNG được vẽ ở đây. Reward là tín hiệu huấn luyện của agent; bộ điều
+khiển fixed-time không có đại lượng tương ứng, nên đặt hai đường lên cùng một
+trục là so sánh hai thứ khác nhau. Xem PROBLEMS.md P0-1.
+
+Cách dùng (chạy từ project root):
+    python comparison/compare_results.py --baseline baseline_results --rl model/run-01
+    python comparison/compare_results.py --baseline baseline_results --rl model/run-01 --out comparison/
 """
 
 import argparse
 import os
+import sys
 import json
+from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")          # chạy không cần GUI
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from metrics import AVG_QUEUE_LABEL, METRICS_VERSION, TOTAL_DELAY_LABEL
 
 
 # ── Màu sắc ────────────────────────────────────────────────────────────
@@ -40,40 +51,56 @@ def _moving_avg(data, window=10):
 
 
 def load_baseline(baseline_dir: str) -> dict:
+    """Đọc kết quả baseline. Thiếu file hoặc sai metrics_version => dừng hẳn.
+
+    Không có fallback: một input thiếu phải làm dừng chương trình, chứ không
+    được âm thầm đổi ý nghĩa của biểu đồ (PROBLEMS.md P0-3).
+    """
     path = os.path.join(baseline_dir, "baseline_results.json")
     if not os.path.exists(path):
-        # fallback: đọc từ txt files
-        r = np.loadtxt(os.path.join(baseline_dir, "baseline_reward_data.txt")).tolist()
-        w = np.loadtxt(os.path.join(baseline_dir, "baseline_wait_data.txt")).tolist()
-        q = np.loadtxt(os.path.join(baseline_dir, "baseline_queue_data.txt")).tolist()
-        return {"cumulative_rewards": r, "cumulative_waits": w, "avg_queues": q}
+        sys.exit(
+            f"Baseline results not found: {path}\n"
+            f"Generate with: python comparison/run_baseline.py --out {baseline_dir}"
+        )
+
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+
+    version = data.get("metrics_version")
+    if version != METRICS_VERSION:
+        sys.exit(
+            f"{path} was written under metrics_version={version!r}, "
+            f"but this build expects {METRICS_VERSION}.\n"
+            f"Its numbers use a different definition of waiting time "
+            f"(see PROBLEMS.md P0-2) and are not comparable.\n"
+            f"Re-run: python comparison/run_baseline.py --out {baseline_dir}"
+        )
+
+    return {"total_delay": data["total_delays"], "avg_queue": data["avg_queues"]}
+
+
+def _require_series(path: str) -> list:
+    """Đọc một series bắt buộc; thiếu thì dừng và in ra đường dẫn mong đợi."""
+    if not os.path.exists(path):
+        sys.exit(
+            f"Required RL series not found: {path}\n"
+            f"It is written by src/train.py at the end of a run. "
+            f"Point --rl at the directory passed to `train.py --out`."
+        )
+    return np.atleast_1d(np.loadtxt(path)).tolist()
 
 
 def load_rl(rl_dir: str) -> dict:
+    """Đọc kết quả RL từ thư mục model run (plot_*_data.txt của src/train.py).
+
+    Chỉ đọc những series được đo giống hệt phía baseline. plot_reward_data.txt
+    cố ý KHÔNG được đọc: nó là chẩn đoán huấn luyện, không phải thước đo để so
+    sánh với baseline (PROBLEMS.md P0-1).
     """
-    Đọc kết quả RL từ thư mục model run.
-    Hỗ trợ cả format txt (plot_*_data.txt) của repo gốc.
-    """
-    result = {}
-
-    reward_txt = os.path.join(rl_dir, "plot_reward_data.txt")
-    queue_txt  = os.path.join(rl_dir, "plot_queue_data.txt")
-    delay_txt  = os.path.join(rl_dir, "plot_delay_data.txt")
-
-    if os.path.exists(reward_txt):
-        result["cumulative_rewards"] = np.loadtxt(reward_txt).tolist()
-    if os.path.exists(queue_txt):
-        result["avg_queues"] = np.loadtxt(queue_txt).tolist()
-    if os.path.exists(delay_txt):
-        result["cumulative_waits"] = np.loadtxt(delay_txt).tolist()
-
-    # Nếu không có delay, dùng reward làm proxy
-    if "cumulative_waits" not in result and "cumulative_rewards" in result:
-        result["cumulative_waits"] = [-r for r in result["cumulative_rewards"]]
-
-    return result
+    return {
+        "total_delay": _require_series(os.path.join(rl_dir, "plot_delay_data.txt")),
+        "avg_queue":   _require_series(os.path.join(rl_dir, "plot_queue_data.txt")),
+    }
 
 
 def _setup_ax(ax, title, xlabel, ylabel):
@@ -89,33 +116,33 @@ def _setup_ax(ax, title, xlabel, ylabel):
 def plot_comparison(baseline: dict, rl: dict, out_dir: str, smooth_window: int = 10):
     os.makedirs(out_dir, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    n_b_eps, n_rl_eps = len(baseline["total_delay"]), len(rl["total_delay"])
+    if n_b_eps != n_rl_eps:
+        print(
+            f"  WARNING: baseline has {n_b_eps} episodes, RL has {n_rl_eps}. "
+            f"Episode n on one curve is not episode n on the other."
+        )
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Baseline vs. DQN Agent", fontsize=15, fontweight="bold", y=1.02)
     fig.patch.set_facecolor("white")
 
+    # Chỉ những đại lượng do cùng một hàm trong src/metrics.py tính ra.
     datasets = [
         {
             "ax":     axes[0],
-            "title":  "Cumulative Reward per Episode",
-            "ylabel": "Cumulative reward",
-            "b_key":  "cumulative_rewards",
-            "rl_key": "cumulative_rewards",
-            "higher_better": True,
-        },
-        {
-            "ax":     axes[1],
-            "title":  "Cumulative Waiting Time per Episode",
-            "ylabel": "Total wait (seconds)",
-            "b_key":  "cumulative_waits",
-            "rl_key": "cumulative_waits",
+            "title":  "Total Delay per Episode",
+            "ylabel": TOTAL_DELAY_LABEL,
+            "b_key":  "total_delay",
+            "rl_key": "total_delay",
             "higher_better": False,
         },
         {
-            "ax":     axes[2],
+            "ax":     axes[1],
             "title":  "Average Queue Length per Episode",
-            "ylabel": "Avg queue (vehicles)",
-            "b_key":  "avg_queues",
-            "rl_key": "avg_queues",
+            "ylabel": AVG_QUEUE_LABEL,
+            "b_key":  "avg_queue",
+            "rl_key": "avg_queue",
             "higher_better": False,
         },
     ]
@@ -172,6 +199,15 @@ def plot_comparison(baseline: dict, rl: dict, out_dir: str, smooth_window: int =
                               edgecolor=COLOR_RL, alpha=0.8),
                 )
 
+    fig.text(
+        0.5, -0.04,
+        "Both series computed by src/metrics.py. Total delay = sum over simulation "
+        "steps of halting vehicles on incoming edges (1 s steps).\n"
+        "Avg queue = total delay / max_steps — the same measurement in another unit, "
+        "not independent corroboration.",
+        ha="center", fontsize=8, color="#666666",
+    )
+
     plt.tight_layout()
     out_path = os.path.join(out_dir, "comparison.png")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -189,9 +225,8 @@ def plot_comparison(baseline: dict, rl: dict, out_dir: str, smooth_window: int =
         return float(np.mean(arr[-n:]))
 
     for label, b_key, rl_key, higher in [
-        ("Cumulative reward (last 10)", "cumulative_rewards", "cumulative_rewards", True),
-        ("Cumulative wait  (last 10)", "cumulative_waits",   "cumulative_waits",   False),
-        ("Avg queue        (last 10)", "avg_queues",         "avg_queues",         False),
+        ("Total delay (last 10)", "total_delay", "total_delay", False),
+        ("Avg queue   (last 10)", "avg_queue",   "avg_queue",   False),
     ]:
         bv  = _last_mean(baseline.get(b_key,  []))
         rlv = _last_mean(rl.get(rl_key, []))
@@ -204,7 +239,11 @@ def plot_comparison(baseline: dict, rl: dict, out_dir: str, smooth_window: int =
 
     print("=" * 60)
     print("(+) = RL higher than baseline  |  (-) = RL lower than baseline")
-    print("For reward: higher is better.  For wait/queue: lower is better.")
+    print("Lower is better for both metrics.")
+    print("Avg queue = total delay / max_steps: the same measurement rescaled,")
+    print("so the two rows agree by construction, not by corroboration.")
+    print(f"Total delay = {TOTAL_DELAY_LABEL} (sum over simulation steps of")
+    print("halting vehicles on the incoming edges; 1-second steps).")
 
 
 if __name__ == "__main__":

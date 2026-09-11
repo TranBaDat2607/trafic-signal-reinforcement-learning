@@ -24,8 +24,9 @@ from sumolib import checkBinary
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from constants import INCOMING_EDGES
 from environment.generator import generate_routefile
+from environment.reward import get_queue_length
+from metrics import METRICS_VERSION, avg_queue, total_delay
 
 
 def load_settings(path: str) -> dict:
@@ -33,25 +34,13 @@ def load_settings(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def get_cumulated_waiting_time() -> float:
-    """Tổng giây chờ tích lũy của tất cả xe trên incoming lanes."""
-    total = 0.0
-    for car_id in traci.vehicle.getIDList():
-        if traci.vehicle.getRoadID(car_id) in INCOMING_EDGES:
-            total += traci.vehicle.getAccumulatedWaitingTime(car_id)
-    return total
-
-
-def get_queue_length() -> int:
-    """Số xe đang đứng yên trên incoming lanes."""
-    return sum(
-        traci.edge.getLastStepHaltingNumber(edge)
-        for edge in INCOMING_EDGES
-    )
-
-
 def run_one_episode(sumocfg_file: Path, max_steps: int, gui: bool) -> dict:
-    """Chạy 1 episode — SUMO tự điều khiển đèn, Python chỉ đo."""
+    """Chạy 1 episode — SUMO tự điều khiển đèn, Python chỉ đo.
+
+    Metrics dùng chung định nghĩa với agent (src/metrics.py). Baseline không
+    có reward: reward là tín hiệu huấn luyện, không phải thước đo chất lượng
+    của bộ điều khiển. Xem PROBLEMS.md P0-1.
+    """
     binary = checkBinary("sumo-gui" if gui else "sumo")
 
     if traci.isLoaded():
@@ -64,29 +53,19 @@ def run_one_episode(sumocfg_file: Path, max_steps: int, gui: bool) -> dict:
         "--waiting-time-memory", str(max_steps),
     ])
 
-    cumulative_wait   = 0.0
-    cumulative_reward = 0.0
-    queue_per_step    = []
-    old_wait          = 0.0
-    step              = 0
+    queue_per_step = []
+    step           = 0
 
     while step < max_steps:
         traci.simulationStep()   # SUMO tự chạy đèn theo tlLogic
         step += 1
-
-        current_wait      = get_cumulated_waiting_time()
-        reward            = old_wait - current_wait
-        cumulative_reward += reward
-        cumulative_wait   += current_wait
-        old_wait           = current_wait
         queue_per_step.append(get_queue_length())
 
     traci.close()
 
     return {
-        "cumulative_reward": cumulative_reward,
-        "cumulative_wait":   cumulative_wait,
-        "avg_queue":         float(np.mean(queue_per_step)),
+        "total_delay": total_delay(queue_per_step),
+        "avg_queue":   avg_queue(queue_per_step, max_steps),
     }
 
 
@@ -101,9 +80,8 @@ def run_baseline(config_path: str, out_dir: str, n_episodes=None, gui: bool = Fa
 
     os.makedirs(out_dir, exist_ok=True)
 
-    all_rewards = []
-    all_waits   = []
-    all_queues  = []
+    all_delays = []
+    all_queues = []
 
     print(f"Running {total_episodes} baseline episodes")
     print("Mode: SUMO native tlLogic — no Python controller, no agent\n")
@@ -119,36 +97,32 @@ def run_baseline(config_path: str, out_dir: str, n_episodes=None, gui: bool = Fa
 
         result = run_one_episode(sumocfg_file, max_steps, gui)
 
-        all_rewards.append(result["cumulative_reward"])
-        all_waits.append(result["cumulative_wait"])
+        all_delays.append(result["total_delay"])
         all_queues.append(result["avg_queue"])
 
         print(
             f"  Ep {ep+1:3d}/{total_episodes}"
-            f"  reward={result['cumulative_reward']:9.1f}"
-            f"  wait={result['cumulative_wait']:9.1f}"
+            f"  delay={result['total_delay']:9d} veh-s"
             f"  queue={result['avg_queue']:.2f}"
         )
 
     # Lưu kết quả
     results = {
-        "mode":               "baseline_sumo_native",
-        "total_episodes":     total_episodes,
-        "cumulative_rewards": all_rewards,
-        "cumulative_waits":   all_waits,
-        "avg_queues":         all_queues,
+        "metrics_version": METRICS_VERSION,
+        "mode":            "baseline_sumo_native",
+        "total_episodes":  total_episodes,
+        "total_delays":    all_delays,
+        "avg_queues":      all_queues,
     }
     with open(os.path.join(out_dir, "baseline_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    np.savetxt(os.path.join(out_dir, "baseline_reward_data.txt"), all_rewards)
-    np.savetxt(os.path.join(out_dir, "baseline_wait_data.txt"),   all_waits)
-    np.savetxt(os.path.join(out_dir, "baseline_queue_data.txt"),  all_queues)
+    np.savetxt(os.path.join(out_dir, "baseline_delay_data.txt"), all_delays)
+    np.savetxt(os.path.join(out_dir, "baseline_queue_data.txt"), all_queues)
 
     print(f"\nSaved to: {out_dir}/")
-    print(f"  Mean reward : {np.mean(all_rewards):.1f}")
-    print(f"  Mean wait   : {np.mean(all_waits):.1f} s")
-    print(f"  Mean queue  : {np.mean(all_queues):.2f} vehicles")
+    print(f"  Mean total delay : {np.mean(all_delays):.1f} vehicle-seconds")
+    print(f"  Mean queue       : {np.mean(all_queues):.2f} vehicles")
     return results
 
 

@@ -18,6 +18,14 @@ from grid.grid_episode import GridRecord
 from grid.network_gen import generate_grid_network, generate_grid_sumocfg
 from grid.parallel_worker import WorkerArgs, run_episode_worker
 from logger import get_logger
+from metrics import (
+    AVG_QUEUE_LABEL,
+    NEG_REWARD_LABEL,
+    TOTAL_DELAY_LABEL,
+    avg_queue,
+    sum_negative_rewards,
+    total_delay,
+)
 from plots import save_data_and_plot
 from settings import load_grid_training_settings
 
@@ -27,11 +35,15 @@ _GRID_TRAINING_SETTINGS_FILE = Path("grid_training_settings.yaml")
 
 
 class GridTrainingStats(TypedDict):
-    """Aggregated per-episode statistics for grid training."""
+    """Aggregated per-episode statistics for grid training.
 
-    sum_neg_reward: list[float]      # summed negative rewards (all junctions)
-    cumulative_wait: list[int]       # summed queue-length steps (all junctions)
-    avg_queue_length: list[float]    # average queue length per step
+    Same definitions as the single-intersection ``TrainingStats`` in
+    ``train.py``, summed across all junctions. Both come from ``metrics.py``.
+    """
+
+    neg_reward: list[float]   # training diagnostic only, all junctions
+    total_delay: list[int]    # vehicle-seconds, all junctions
+    avg_queue: list[float]    # vehicles, all junctions
 
 
 def _add_experiences(
@@ -57,19 +69,13 @@ def _update_stats(
     stats: GridTrainingStats,
 ) -> GridTrainingStats:
     """Update *stats* in-place with one episode's data and return it."""
-    neg_reward = sum(
-        rec.reward
-        for records in history.values()
-        for rec in records
-        if rec.reward < 0
-    )
-    stats["sum_neg_reward"].append(neg_reward)
+    rewards = [rec.reward for records in history.values() for rec in records]
+    stats["neg_reward"].append(sum_negative_rewards(rewards))
 
-    total_queue = sum(
-        sum(s.queue_lengths.values()) for s in env_stats
-    )
-    stats["cumulative_wait"].append(total_queue)
-    stats["avg_queue_length"].append(round(total_queue / max(max_steps, 1), 1))
+    # One scalar per simulation step: the queue summed over every junction.
+    queue_per_step = [sum(s.queue_lengths.values()) for s in env_stats]
+    stats["total_delay"].append(total_delay(queue_per_step))
+    stats["avg_queue"].append(avg_queue(queue_per_step, max_steps))
 
     return stats
 
@@ -120,9 +126,9 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
     src_path = str(Path(__file__).resolve().parent)
 
     training_stats: GridTrainingStats = {
-        "sum_neg_reward": [],
-        "cumulative_wait": [],
-        "avg_queue_length": [],
+        "neg_reward": [],
+        "total_delay": [],
+        "avg_queue": [],
     }
 
     should_stop = False
@@ -172,8 +178,8 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
             # Log and check early stopping for each episode in the batch
             for i in range(batch_count):
                 ep_num = episode_idx + i + 1
-                ep_reward = training_stats["sum_neg_reward"][episode_idx + i]
-                ep_queue = training_stats["avg_queue_length"][episode_idx + i]
+                ep_reward = training_stats["neg_reward"][episode_idx + i]
+                ep_queue = training_stats["avg_queue"][episode_idx + i]
                 logger.info(
                     f"\tEp {ep_num}: reward={ep_reward:.1f}  avg_queue={ep_queue:.1f}"
                 )
@@ -210,24 +216,24 @@ def grid_training_session(settings_file: Path, out_path: Path) -> None:
     copyfile(src=settings_file, dst=out_path / _GRID_TRAINING_SETTINGS_FILE)
 
     save_data_and_plot(
-        data=training_stats["sum_neg_reward"],
+        data=training_stats["neg_reward"],
         filename="grid_reward",
         xlabel="Episode",
-        ylabel="Cumulative negative reward (all junctions)",
+        ylabel=f"{NEG_REWARD_LABEL} (all junctions)",
         out_folder=out_path,
     )
     save_data_and_plot(
-        data=training_stats["cumulative_wait"],
+        data=training_stats["total_delay"],
         filename="grid_delay",
         xlabel="Episode",
-        ylabel="Cumulative delay (all junctions)",
+        ylabel=f"{TOTAL_DELAY_LABEL} (all junctions)",
         out_folder=out_path,
     )
     save_data_and_plot(
-        data=training_stats["avg_queue_length"],
+        data=training_stats["avg_queue"],
         filename="grid_queue",
         xlabel="Episode",
-        ylabel="Average queue length (vehicles)",
+        ylabel=f"{AVG_QUEUE_LABEL} (all junctions)",
         out_folder=out_path,
     )
 

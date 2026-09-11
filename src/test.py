@@ -14,16 +14,22 @@ from constants import (
 from environment import Environment
 from episode import run_episode
 from logger import get_logger
+from metrics import avg_queue, total_delay
 from settings import load_testing_settings, load_training_settings
 
 logger = get_logger(__name__)
 
 
 class TestStats(TypedDict):
-    """Aggregated statistics collected during testing episodes."""
+    """Aggregated per-episode statistics collected during evaluation.
 
-    cumulative_wait: list[int]
-    avg_queue_length: list[float]
+    Metric definitions live in ``metrics.py``; see ``TrainingStats`` in
+    ``train.py``. No reward diagnostic here — evaluation runs greedily and the
+    reward signal is a property of training, not of controller quality.
+    """
+
+    total_delay: list[int]   # vehicle-seconds
+    avg_queue: list[float]   # vehicles
 
 
 def testing_session(model_path: Path, settings_file: Path) -> None:
@@ -46,8 +52,8 @@ def testing_session(model_path: Path, settings_file: Path) -> None:
     agent = Agent(settings=train_settings, epsilon=0.0, model_path=model_path)
 
     test_stats: TestStats = {
-        "cumulative_wait": [],
-        "avg_queue_length": [],
+        "total_delay": [],
+        "avg_queue": [],
     }
 
     for episode in range(settings.total_episodes):
@@ -66,22 +72,23 @@ def testing_session(model_path: Path, settings_file: Path) -> None:
 
         _, env_stats = run_episode(env=env, agent=agent, seed=seed)
 
-        sum_queue = sum(s.queue_length for s in env_stats)
-        avg_queue = round(sum_queue / settings.max_steps, 1)
+        queue_per_step = [s.queue_length for s in env_stats]
+        episode_delay = total_delay(queue_per_step)
+        episode_queue = avg_queue(queue_per_step, settings.max_steps)
 
-        test_stats["cumulative_wait"].append(sum_queue)
-        test_stats["avg_queue_length"].append(avg_queue)
+        test_stats["total_delay"].append(episode_delay)
+        test_stats["avg_queue"].append(episode_queue)
 
-        logger.info(f"\tCumulative wait (queue-steps): {sum_queue}")
-        logger.info(f"\tAvg queue length: {avg_queue}")
+        logger.info(f"\tTotal delay (vehicle-seconds): {episode_delay}")
+        logger.info(f"\tAvg queue length: {episode_queue}")
 
-    avg_wait = sum(test_stats["cumulative_wait"]) / settings.total_episodes
-    avg_queue = sum(test_stats["avg_queue_length"]) / settings.total_episodes
+    mean_delay = sum(test_stats["total_delay"]) / settings.total_episodes
+    mean_queue = sum(test_stats["avg_queue"]) / settings.total_episodes
 
     logger.info("--- Test Summary ---")
-    logger.info(f"Episodes:                          {settings.total_episodes}")
-    logger.info(f"Avg cumulative wait (queue-steps): {avg_wait:.1f}")
-    logger.info(f"Avg queue length:                  {avg_queue:.2f}")
+    logger.info(f"Episodes:                           {settings.total_episodes}")
+    logger.info(f"Mean total delay (vehicle-seconds): {mean_delay:.1f}")
+    logger.info(f"Mean queue length:                  {mean_queue:.2f}")
 
 
 if __name__ == "__main__":
